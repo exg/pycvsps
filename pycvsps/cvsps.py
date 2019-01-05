@@ -50,6 +50,9 @@ class logentry(object):
 class logerror(Exception):
     pass
 
+def parse_revision(revision):
+    return tuple(map(int, revision.split('.')))
+
 def getrepopath(cvspath):
     """Return the repository path from a CVS path.
 
@@ -279,13 +282,12 @@ def createlog(ui, directory=None, root="", rlog=True, cache=None):
             # read the symbolic names and store as tags
             match = re_30.match(line)
             if match:
-                rev = [int(x) for x in match.group(2).split('.')]
+                rev = parse_revision(match.group(2))
 
                 # Convert magic branch number to an odd-numbered one
                 revn = len(rev)
                 if revn > 3 and (revn % 2) == 0 and rev[-2] == 0:
                     rev = rev[:-2] + rev[-1:]
-                rev = tuple(rev)
 
                 if rev not in tags:
                     tags[rev] = []
@@ -313,8 +315,7 @@ def createlog(ui, directory=None, root="", rlog=True, cache=None):
             assert match, _('expected revision number')
             e = logentry(rcs=scache(rcs),
                          file=scache(filename),
-                         revision=tuple([int(x) for x in
-                                         match.group(1).split('.')]),
+                         revision=parse_revision(match.group(1)),
                          branches=[],
                          parent=None,
                          commitid=None,
@@ -373,8 +374,9 @@ def createlog(ui, directory=None, root="", rlog=True, cache=None):
             # or store the commit log message otherwise
             m = re_70.match(line)
             if m:
-                e.branches = [tuple([int(y) for y in x.strip().split('.')])
-                                for x in m.group(1).split(';')]
+                e.branches = [
+                    parse_revision(x.strip()) for x in m.group(1).split(';')
+                ]
                 state = 8
             elif re_31.match(line) and re_50.match(peek):
                 state = 5
@@ -433,7 +435,7 @@ def createlog(ui, directory=None, root="", rlog=True, cache=None):
             # find the branches starting from this revision
             branchpoints = set()
             for branch, revision in branchmap.iteritems():
-                revparts = tuple([int(i) for i in revision.split('.')])
+                revparts = parse_revision(revision)
                 if len(revparts) < 2: # bad tags
                     continue
                 if revparts[-2] == 0 and revparts[-1] % 2 == 0:
