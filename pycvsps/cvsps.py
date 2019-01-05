@@ -107,23 +107,23 @@ def createlog(ui, directory=None, root="", rlog=True, cache=None):
     log = []      # list of logentry objects containing the CVS state
 
     # patterns to match in CVS (r)log output, by state of use
-    re_00 = re.compile('RCS file: (.+)$')
-    re_01 = re.compile('cvs \\[r?log aborted\\]: (.+)$')
-    re_02 = re.compile('cvs (r?log|server): (.+)\n$')
-    re_03 = re.compile("(Cannot access.+CVSROOT)|"
-                       "(can't create temporary directory.+)$")
-    re_10 = re.compile('Working file: (.+)$')
-    re_20 = re.compile('symbolic names:')
-    re_30 = re.compile('\t(.+): ([\\d.]+)$')
-    re_31 = re.compile('----------------------------$')
-    re_32 = re.compile('======================================='
-                       '======================================$')
-    re_50 = re.compile('revision ([\\d.]+)(\s+locked by:\s+.+;)?$')
+    re_00 = re.compile(r'RCS file: (.+)$')
+    re_01 = re.compile(r'cvs \[r?log aborted\]: (.+)$')
+    re_02 = re.compile(r'cvs (r?log|server): (.+)\n$')
+    re_03 = re.compile(r"(Cannot access.+CVSROOT)|"
+                       r"(can't create temporary directory.+)$")
+    re_10 = re.compile(r'Working file: (.+)$')
+    re_20 = re.compile(r'symbolic names:')
+    re_30 = re.compile(r'\t(.+): ([\d.]+)$')
+    re_31 = re.compile(r'----------------------------$')
+    re_32 = re.compile(r'======================================='
+                       r'======================================$')
+    re_50 = re.compile(r'revision ([\d.]+)(\s+locked by:\s+.+;)?$')
     re_60 = re.compile(r'date:\s+(.+);\s+author:\s+(.+);\s+state:\s+(.+?);'
                        r'(\s+lines:\s+(\+\d+)?\s+(-\d+)?;)?'
                        r'(\s+commitid:\s+([^;]+);)?'
                        r'(.*mergepoint:\s+([^;]+);)?')
-    re_70 = re.compile('branches: (.+);$')
+    re_70 = re.compile(r'branches: (.+);$')
 
     file_added_re = re.compile(r'file [^/]+ was (initially )?added on branch')
 
