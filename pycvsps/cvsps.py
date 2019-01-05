@@ -733,15 +733,11 @@ def createchangeset(ui, log, fuzz=60, mergefrom=None, mergeto=None):
     if mergefrom:
         mergefrom = re.compile(mergefrom)
 
-    versions = {}    # changeset index where we saw any particular file version
     branches = {}    # changeset index where we saw a branch
     n = len(changesets)
     i = 0
     while i < n:
         c = changesets[i]
-
-        for f in c.entries:
-            versions[(f.rcs, f.revision)] = i
 
         p = None
         if c.branch in branches:
