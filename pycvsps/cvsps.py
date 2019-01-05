@@ -521,10 +521,113 @@ class changeset(object):
         .mergepoint- the branch that has been merged from or None
         .branchpoints- the branches that start at the current entry or empty
     '''
-    def __init__(self, **entries):
+    def __init__(
+        self, author, branch, comment, date, commitid, branchpoints, mergepoint
+    ):
         self.id = None
+        self.entries = []
+        self.parents = []
+        self.tags = []
         self.synthetic = False
-        self.__dict__.update(entries)
+        self._files = set()
+        self._versions = set()
+        self.author = author
+        self.branch = branch
+        self.comment = comment
+        self.date = date
+        self.commitid = commitid
+        self.branchpoints = branchpoints
+        self.mergepoint = mergepoint
+
+    @classmethod
+    def from_logentry(cls, entry):
+        cs = cls(
+            entry.author,
+            entry.branch,
+            entry.comment,
+            entry.date,
+            entry.commitid,
+            entry.branchpoints,
+            entry.mergepoint,
+        )
+        cs._add(entry)
+        return cs
+
+    @classmethod
+    def from_merge(cls, from_cs, to_cs):
+        comment = 'convert-repo: CVS merge from branch %s'
+        cs = cls(
+            from_cs.author,
+            to_cs.branch,
+            comment % from_cs.branch,
+            from_cs.date,
+            None,
+            None,
+            None,
+        )
+        cs.parents.append(from_cs)
+        cs.parents.append(to_cs)
+        return cs
+
+    def _add(self, entry):
+        # Synthetic revisions always get their own changeset, because
+        # the log message includes the filename.  E.g. if you add file3
+        # and file4 on a branch, you get four log entries and three
+        # changesets:
+        #   "File file3 was added on branch ..." (synthetic, 1 entry)
+        #   "File file4 was added on branch ..." (synthetic, 1 entry)
+        #   "Add file3 and file4 to fix ..."     (real, 2 entries)
+        self.synthetic = not self.entries and entry.synthetic
+        self.entries.append(entry)
+        # changeset date is date of latest commit in it
+        self.date = entry.date
+        self._files.add(entry.file)
+        self._versions.add((entry.rcs, entry.revision))
+
+    def _can_cover(self, entry, fuzz):
+        # Since CVS is file-centric, two different file revisions with
+        # different branchpoints should be treated as belonging to two
+        # different changesets (and the ordering is important and not
+        # honoured by cvsps at this point).
+        #
+        # Consider the following case:
+        # foo 1.1 branchpoints: [MYBRANCH]
+        # bar 1.1 branchpoints: [MYBRANCH, MYBRANCH2]
+        #
+        # Here foo is part only of MYBRANCH, but not MYBRANCH2, e.g. a
+        # later version of foo may be in MYBRANCH2, so foo should be the
+        # first changeset and bar the next and MYBRANCH and MYBRANCH2
+        # should both start off of the bar changeset. No provisions are
+        # made to ensure that this is, in fact, what happens.
+        if entry.branchpoints != self.branchpoints:
+            return False
+        if self.commitid is not None:
+            return entry.commitid == self.commitid
+        else:
+            return (
+                entry.commitid is None
+                and entry.author == self.author
+                and entry.branch == self.branch
+                and entry.comment == self.comment
+                and entry.file not in self._files
+                and (
+                    (self.date[0] + self.date[1])
+                    <= (entry.date[0] + entry.date[1])
+                    < (self.date[0] + self.date[1]) + fuzz
+                )
+            )
+
+    def add_entry(self, entry, fuzz):
+        if not self._can_cover(entry, fuzz):
+            return False
+        self._add(entry)
+        return True
+
+    def is_child(self, other):
+        for entry in self.entries:
+            if (entry.rcs, entry.parent) in other._versions:
+                return True
+        return False
 
     def __repr__(self):
         items = ("%s=%r"%(k, self.__dict__[k]) for k in sorted(self.__dict__))
@@ -546,65 +649,15 @@ def createchangeset(ui, log, fuzz=60, mergefrom=None, mergeto=None):
                             x.author, x.branch, x.date, x.branchpoints))
 
     changesets = []
-    files = set()
     c = None
     for i, e in enumerate(log):
-
-        # Check if log entry belongs to the current changeset or not.
-
-        # Since CVS is file-centric, two different file revisions with
-        # different branchpoints should be treated as belonging to two
-        # different changesets (and the ordering is important and not
-        # honoured by cvsps at this point).
-        #
-        # Consider the following case:
-        # foo 1.1 branchpoints: [MYBRANCH]
-        # bar 1.1 branchpoints: [MYBRANCH, MYBRANCH2]
-        #
-        # Here foo is part only of MYBRANCH, but not MYBRANCH2, e.g. a
-        # later version of foo may be in MYBRANCH2, so foo should be the
-        # first changeset and bar the next and MYBRANCH and MYBRANCH2
-        # should both start off of the bar changeset. No provisions are
-        # made to ensure that this is, in fact, what happens.
-        if not (c and e.branchpoints == c.branchpoints and
-                (# cvs commitids
-                 (e.commitid is not None and e.commitid == c.commitid) or
-                 (# no commitids, use fuzzy commit detection
-                  (e.commitid is None or c.commitid is None) and
-                   e.comment == c.comment and
-                   e.author == c.author and
-                   e.branch == c.branch and
-                   ((c.date[0] + c.date[1]) <=
-                    (e.date[0] + e.date[1]) <=
-                    (c.date[0] + c.date[1]) + fuzz) and
-                   e.file not in files))):
-            c = changeset(comment=e.comment, author=e.author,
-                          branch=e.branch, date=e.date,
-                          entries=[], mergepoint=e.mergepoint,
-                          branchpoints=e.branchpoints, commitid=e.commitid)
+        if not (c and c.add_entry(e, fuzz)):
+            c = changeset.from_logentry(e)
             changesets.append(c)
 
-            files = set()
             if len(changesets) % 100 == 0:
                 t = '%d %s' % (len(changesets), repr(e.comment)[1:-1])
                 ui.status(util.ellipsis(t, 80) + '\n')
-
-        c.entries.append(e)
-        files.add(e.file)
-        c.date = e.date       # changeset date is date of latest commit in it
-
-    # Mark synthetic changesets
-
-    for c in changesets:
-        # Synthetic revisions always get their own changeset, because
-        # the log message includes the filename.  E.g. if you add file3
-        # and file4 on a branch, you get four log entries and three
-        # changesets:
-        #   "File file3 was added on branch ..." (synthetic, 1 entry)
-        #   "File file4 was added on branch ..." (synthetic, 1 entry)
-        #   "Add file3 and file4 to fix ..."     (real, 2 entries)
-        # Hence the check for 1 entry here.
-        c.synthetic = len(c.entries) == 1 and c.entries[0].synthetic
 
     # Sort files in each changeset
     for c in changesets:
@@ -619,26 +672,13 @@ def createchangeset(ui, log, fuzz=60, mergefrom=None, mergeto=None):
             return d
 
         # detect vendor branches and initial commits on a branch
-        le = {}
-        for e in l.entries:
-            le[e.rcs] = e.revision
-        re = {}
-        for e in r.entries:
-            re[e.rcs] = e.revision
+        if l.is_child(r):
+            d = 1
 
-        d = 0
-        for e in l.entries:
-            if re.get(e.rcs, None) == e.parent:
-                assert not d
-                d = 1
-                break
-
-        for e in r.entries:
-            if le.get(e.rcs, None) == e.parent:
-                if d:
-                    odd.add((l, r))
-                d = -1
-                break
+        if r.is_child(l):
+            if d:
+                odd.add((l, r))
+            d = -1
         # By this point, the changesets are sufficiently compared that
         # we don't really care about ordering. However, this leaves
         # some race conditions in the tests, so we compare on the
@@ -719,7 +759,6 @@ def createchangeset(ui, log, fuzz=60, mergefrom=None, mergeto=None):
                     continue
                 p = candidate
 
-        c.parents = []
         if p is not None:
             p = changesets[p]
 
@@ -767,12 +806,7 @@ def createchangeset(ui, log, fuzz=60, mergefrom=None, mergeto=None):
                     m = None   # if no group found then merge to HEAD
                 if m in branches and c.branch != m:
                     # insert empty changeset for merge
-                    cc = changeset(
-                        author=c.author, branch=m, date=c.date,
-                        comment='convert-repo: CVS merge from branch %s'
-                        % c.branch,
-                        entries=[], tags=[],
-                        parents=[changesets[branches[m]], c])
+                    cc = changeset.from_merge(c, changesets[branches[m]])
                     changesets.insert(i + 1, cc)
                     branches[m] = i + 1
 
