@@ -158,7 +158,7 @@ def createlog(ui, directory=None, root="", rlog=True, cache=None):
     date = None
 
     if cache:
-        cachedir = os.path.expanduser('~/.hg.cvsps')
+        cachedir = os.path.expanduser('~/.pycvsps')
         if not os.path.exists(cachedir):
             os.mkdir(cachedir)
 
