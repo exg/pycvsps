@@ -4,20 +4,25 @@
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
-from __future__ import absolute_import
 
+import functools
 import os
+import os.path
+import pickle
 import re
+import subprocess
+import sys
+from optparse import OptionParser, SUPPRESS_HELP
+from .dateutil import datestr, parsedate
 
-from mercurial.i18n import _
-from mercurial import (
-    encoding,
-    hook,
-    pycompat,
-    util,
-)
+def ellipsis(text, maxlength=400):
+    if len(text) <= maxlength:
+        return text
+    else:
+        return "%s..." % (text[:maxlength - 3])
 
-pickle = util.pickle
+def _(s):
+    return s
 
 class logentry(object):
     '''Class logentry has the following attributes:
@@ -161,22 +166,26 @@ def createlog(ui, directory=None, root="", rlog=True, cache=None):
 
         # Get the real directory in the repository
         try:
-            directory = open(os.path.join('CVS', 'Repository')).read().strip()
+            with open(os.path.join('CVS', 'Repository'), encoding='ascii') as f:
+                directory = f.read().strip()
         except IOError:
             raise logerror(_('not a CVS sandbox'))
 
         # Use the Root file in the sandbox, if it exists
         try:
-            root = open(os.path.join('CVS','Root')).read().strip()
+            with open(os.path.join('CVS', 'Root'), encoding='ascii') as f:
+                root = f.read().strip()
         except IOError:
             pass
 
     if not root:
-        root = encoding.environ.get('CVSROOT', '')
+        root = os.environ.get('CVSROOT', '')
 
     # read log cache if one exists
     oldlog = []
     date = None
+
+    update_log = cache in ('write', 'update')
 
     if cache:
         cachedir = os.path.expanduser('~/.pycvsps')
@@ -197,25 +206,21 @@ def createlog(ui, directory=None, root="", rlog=True, cache=None):
         cachefile = os.path.join(cachedir,
                                  '.'.join([s for s in cachefile if s]))
 
-    if cache == 'update':
+    if cache in ('read', 'update'):
         try:
             ui.note(_('reading cvs log cache %s\n') % cachefile)
-            oldlog = pickle.load(open(cachefile))
-            for e in oldlog:
-                if not (util.safehasattr(e, 'branchpoints') and
-                        util.safehasattr(e, 'commitid') and
-                        util.safehasattr(e, 'mergepoint')):
-                    ui.status(_('ignoring old cache\n'))
-                    oldlog = []
-                    break
-
+            oldlog = pickle.load(open(cachefile, 'rb'))
             ui.note(_('cache has %d log entries\n') % len(oldlog))
         except Exception as e:
             ui.note(_('error reading cache: %r\n') % e)
+            update_log = True
 
         if oldlog:
             date = oldlog[-1].date    # last commit date as a (time,tz) tuple
-            date = util.datestr(date, '%Y/%m/%d %H:%M:%S %1%2')
+            date = datestr(date, '%Y/%m/%d %H:%M:%S %1%2')
+
+    if not update_log:
+        return oldlog
 
     # build the CVS commandline
     cmd = ['cvs', '-q']
@@ -235,17 +240,16 @@ def createlog(ui, directory=None, root="", rlog=True, cache=None):
     state = 0
     store = False # set when a new record can be appended
 
-    cmd = [util.shellquote(arg) for arg in cmd]
     ui.note(_("running %s\n") % (' '.join(cmd)))
     ui.debug("prefix=%r directory=%r root=%r\n" % (prefix, directory, root))
 
-    pfp = util.popen(' '.join(cmd))
-    peek = pfp.readline()
+    pfp = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    peek = pfp.stdout.readline().decode('latin-1')
     while True:
         line = peek
         if line == '':
             break
-        peek = pfp.readline()
+        peek = pfp.stdout.readline().decode('latin-1')
         if line.endswith('\n'):
             line = line[:-1]
         #ui.debug('state=%d line=%r\n' % (state, line))
@@ -257,11 +261,11 @@ def createlog(ui, directory=None, root="", rlog=True, cache=None):
                 rcs = match.group(1)
                 tags = {}
                 if rlog:
-                    filename = util.normpath(rcs[:-2])
+                    filename = os.path.normpath(rcs[:-2])
                     if filename.startswith(prefix):
                         filename = filename[len(prefix):]
-                    filename = rcs_path(filename)
-                    state = 2
+                        filename = rcs_path(filename)
+                        state = 2
                     continue
                 state = 1
                 continue
@@ -278,7 +282,7 @@ def createlog(ui, directory=None, root="", rlog=True, cache=None):
             # expect 'Working file' (only when using log instead of rlog)
             match = re_10.match(line)
             assert match, _('RCS file must be followed by working file')
-            filename = util.normpath(match.group(1))
+            filename = os.path.normpath(match.group(1))
             state = 2
 
         elif state == 2:
@@ -345,9 +349,9 @@ def createlog(ui, directory=None, root="", rlog=True, cache=None):
             if len(d.split()) != 3:
                 # cvs log dates always in GMT
                 d = d + ' UTC'
-            e.date = util.parsedate(d, ['%y/%m/%d %H:%M:%S',
-                                        '%Y/%m/%d %H:%M:%S',
-                                        '%Y-%m-%d %H:%M:%S'])
+            e.date = parsedate(d, ['%y/%m/%d %H:%M:%S',
+                                   '%Y/%m/%d %H:%M:%S',
+                                   '%Y-%m-%d %H:%M:%S'])
             e.author = scache(match.group(2))
             e.dead = match.group(3).lower() == 'dead'
 
@@ -443,7 +447,7 @@ def createlog(ui, directory=None, root="", rlog=True, cache=None):
 
             # find the branches starting from this revision
             branchpoints = set()
-            for branch, revision in branchmap.iteritems():
+            for branch, revision in branchmap.items():
                 revparts = parse_revision(revision)
                 if len(revparts) < 2: # bad tags
                     continue
@@ -461,7 +465,7 @@ def createlog(ui, directory=None, root="", rlog=True, cache=None):
             rcsmap[e.file] = e.rcs
 
             if len(log) % 100 == 0:
-                ui.status(util.ellipsis('%d %s' % (len(log), e.file), 80)+'\n')
+                ui.status(ellipsis('%d %s' % (len(log), e.file), 80) + '\n')
 
     log.sort(key=lambda x: (x.rcs, x.revision))
 
@@ -495,13 +499,13 @@ def createlog(ui, directory=None, root="", rlog=True, cache=None):
 
             # write the new cachefile
             ui.note(_('writing cvs log cache %s\n') % cachefile)
-            pickle.dump(log, open(cachefile, 'w'))
+            pickle.dump(log, open(cachefile, 'wb'))
         else:
             log = oldlog
 
     ui.status(_('%d log entries\n') % len(log))
 
-    hook.hook(ui, None, "cvslog", True, log=log)
+    # hook.hook(ui, None, "cvslog", True, log=log)
 
     return log
 
@@ -642,11 +646,23 @@ def createchangeset(ui, log, fuzz=60, mergefrom=None, mergeto=None):
     mindate = {}
     for e in log:
         if e.commitid:
-            mindate[e.commitid] = min(e.date, mindate.get(e.commitid))
+            if e.commitid not in mindate:
+                mindate[e.commitid] = e.date
+            else:
+                mindate[e.commitid] = min(e.date, mindate[e.commitid])
 
     # Merge changesets
-    log.sort(key=lambda x: (mindate.get(x.commitid), x.commitid, x.comment,
-                            x.author, x.branch, x.date, x.branchpoints))
+    log.sort(
+        key=lambda x: (
+            mindate.get(x.commitid, (-1, 0)),
+            x.commitid or '',
+            x.comment,
+            x.author,
+            x.branch or '',
+            x.date,
+            x.branchpoints,
+        )
+    )
 
     changesets = []
     c = None
@@ -657,7 +673,7 @@ def createchangeset(ui, log, fuzz=60, mergefrom=None, mergeto=None):
 
             if len(changesets) % 100 == 0:
                 t = '%d %s' % (len(changesets), repr(e.comment)[1:-1])
-                ui.status(util.ellipsis(t, 80) + '\n')
+                ui.status(ellipsis(t, 80) + '\n')
 
     # Sort files in each changeset
     for c in changesets:
@@ -666,6 +682,7 @@ def createchangeset(ui, log, fuzz=60, mergefrom=None, mergeto=None):
     # Sort changesets by date
 
     odd = set()
+
     def cscmp(l, r):
         d = sum(l.date) - sum(r.date)
         if d:
@@ -688,7 +705,9 @@ def createchangeset(ui, log, fuzz=60, mergefrom=None, mergeto=None):
 
         # recommended replacement for cmp from
         # https://docs.python.org/3.0/whatsnew/3.0.html
-        c = lambda x, y: (x > y) - (x < y)
+        def c(x, y):
+            return (x > y) - (x < y)
+
         # Sort bigger changes first.
         if not d:
             d = c(len(l.entries), len(r.entries))
@@ -701,7 +720,7 @@ def createchangeset(ui, log, fuzz=60, mergefrom=None, mergeto=None):
             d = c(len(l.branchpoints), len(r.branchpoints))
         return d
 
-    changesets.sort(cscmp)
+    changesets.sort(key=functools.cmp_to_key(cscmp))
 
     # Collect tags
 
@@ -748,7 +767,7 @@ def createchangeset(ui, log, fuzz=60, mergefrom=None, mergeto=None):
             # branchpoints such that it is the latest possible
             # commit without any intervening, unrelated commits.
 
-            for candidate in xrange(i):
+            for candidate in range(i):
                 if c.branch not in changesets[candidate].branchpoints:
                     if p is not None:
                         break
@@ -836,7 +855,7 @@ def createchangeset(ui, log, fuzz=60, mergefrom=None, mergeto=None):
 
     ui.status(_('%d changeset entries\n') % len(changesets))
 
-    hook.hook(ui, None, "cvschangesets", True, changesets=changesets)
+    # hook.hook(ui, None, "cvschangesets", True, changesets=changesets)
 
     return changesets
 
@@ -851,7 +870,7 @@ def debugcvsps(ui, *args, **opts):
     elif opts["update_cache"]:
         cache = "update"
     else:
-        cache = None
+        cache = "read"
 
     revisions = opts["revisions"]
 
@@ -887,16 +906,18 @@ def debugcvsps(ui, *args, **opts):
             continue
 
         if not off:
+            cs_date = min([e.date for e in cs.entries])
+            cs_tags = cs.tags[:1]
             # Note: trailing spaces on several lines here are needed to have
             #       bug-for-bug compatibility with cvsps.
             ui.write('---------------------\n')
             ui.write(('PatchSet %d \n' % cs.id))
-            ui.write(('Date: %s\n' % util.datestr(cs.date,
-                                                 '%Y/%m/%d %H:%M:%S %1%2')))
+            ui.write(('Date: %s\n' % datestr(cs_date,
+                                             '%Y/%m/%d %H:%M:%S %1%2')))
             ui.write(('Author: %s\n' % cs.author))
             ui.write(('Branch: %s\n' % (cs.branch or 'HEAD')))
-            ui.write(('Tag%s: %s \n' % (['', 's'][len(cs.tags) > 1],
-                                  ','.join(cs.tags) or '(none)')))
+            ui.write(('Tag%s: %s \n' % (['', 's'][len(cs_tags) > 1],
+                                        ','.join(cs_tags) or '(none)')))
             if cs.branchpoints:
                 ui.write(('Branchpoints: %s \n') %
                          ', '.join(sorted(cs.branchpoints)))
@@ -940,3 +961,129 @@ def debugcvsps(ui, *args, **opts):
             if revisions[1] == str(cs.id) or \
                 revisions[1] in cs.tags:
                 break
+
+def main():
+    '''Main program to mimic cvsps.'''
+
+    op = OptionParser(
+        usage='%prog [-bpruvxz] path',
+        description='Read CVS rlog for current directory or named '
+        'path in repository, and convert the log to changesets '
+        'based on matching commit log entries and dates.',
+    )
+
+    # Options that are ignored for compatibility with cvsps-2.1
+    op.add_option('-A', dest='ignore', action='store_true', help=SUPPRESS_HELP)
+    op.add_option(
+        '--cvs-direct', dest='ignore', action='store_true', help=SUPPRESS_HELP
+    )
+    op.add_option('-q', dest='ignore', action='store_true', help=SUPPRESS_HELP)
+    op.add_option(
+        '--norc', dest='ignore', action='store_true', help=SUPPRESS_HELP
+    )
+
+    # Main options shared with cvsps-2.1
+    op.add_option(
+        '-b',
+        dest='branches',
+        action='append',
+        default=[],
+        help='Only return changes on specified branches',
+    )
+    op.add_option(
+        '-p',
+        dest='prefix',
+        action='store',
+        default='',
+        help='Prefix to remove from file names',
+    )
+    op.add_option(
+        '-r',
+        dest='revisions',
+        action='append',
+        default=[],
+        help='Only return changes after or between specified tags',
+    )
+    op.add_option(
+        '-u',
+        dest='update_cache',
+        action='store_true',
+        help="Update cvs log cache",
+    )
+    op.add_option(
+        '-v', dest='verbose', action='count', default=0, help='Be verbose'
+    )
+    op.add_option(
+        '-x',
+        dest='new_cache',
+        action='store_true',
+        help="Create new cvs log cache",
+    )
+    op.add_option(
+        '-z',
+        dest='fuzz',
+        action='store',
+        type='int',
+        default=60,
+        help='Set commit time fuzz',
+        metavar='seconds',
+    )
+    op.add_option(
+        '--root',
+        dest='root',
+        action='store',
+        default='',
+        help='Specify cvsroot',
+        metavar='cvsroot',
+    )
+
+    # Options specific to this version
+    op.add_option(
+        '--parents',
+        dest='parents',
+        action='store_true',
+        help='Show parent changesets',
+    )
+    op.add_option(
+        '--ancestors',
+        dest='ancestors',
+        action='store_true',
+        help='Show current changeset in ancestor branches',
+    )
+
+    options, args = op.parse_args()
+
+    opts = dict()
+    for attr in vars(options):
+        if attr not in ('ignore', 'verbose'):
+            opts[attr] = getattr(options, attr)
+
+    # Create a ui object for printing progress messages
+    class UI:
+        def __init__(self, verbose):
+            if verbose:
+                self.status = self.message
+            if verbose > 1:
+                self.note = self.message
+            if verbose > 2:
+                self.debug = self.message
+
+        def write(self, msg):
+            sys.stdout.buffer.write(msg.encode('latin-1'))
+
+        def message(self, msg):
+            sys.stderr.buffer.write(msg.encode('latin-1'))
+
+        def nomessage(self, msg):
+            pass
+
+        status = nomessage
+        note = nomessage
+        debug = nomessage
+
+    ui = UI(options.verbose)
+
+    debugcvsps(ui, *args, **opts)
+
+if __name__ == '__main__':
+    main()
