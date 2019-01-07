@@ -92,6 +92,35 @@ def getrepopath(cvspath):
     repopath = parts[-1][parts[-1].find('/', start):]
     return repopath
 
+def rcs_path(path):
+    dname, fname = os.path.split(path)
+    comps = []
+    if dname:
+        while True:
+            head, tail = os.path.split(dname)
+            if dname == head:
+                break
+            dname = head
+            if tail and tail != 'Attic':
+                comps.append(tail)
+        comps.reverse()
+    comps.append(fname)
+    return os.path.join(*comps)
+
+def build_prefix(root, repository):
+    repository = os.path.normpath(repository)
+    if repository == '.':
+        repository = ''
+    if root:
+        path = os.path.normpath(getrepopath(root))
+        if repository:
+            prefix = os.path.join(path, repository)
+        else:
+            prefix = path
+    else:
+        prefix = repository
+    return prefix + os.sep
+
 def createlog(ui, directory=None, root="", rlog=True, cache=None):
     '''Collect the CVS rlog'''
 
@@ -127,22 +156,14 @@ def createlog(ui, directory=None, root="", rlog=True, cache=None):
 
     file_added_re = re.compile(r'file [^/]+ was (initially )?added on branch')
 
-    prefix = ''   # leading path to strip of what we get from CVS
-
     if directory is None:
         # Current working directory
 
         # Get the real directory in the repository
         try:
-            prefix = open(os.path.join('CVS','Repository')).read().strip()
-            directory = prefix
-            if prefix == ".":
-                prefix = ""
+            directory = open(os.path.join('CVS', 'Repository')).read().strip()
         except IOError:
             raise logerror(_('not a CVS sandbox'))
-
-        if prefix and not prefix.endswith(pycompat.ossep):
-            prefix += pycompat.ossep
 
         # Use the Root file in the sandbox, if it exists
         try:
@@ -200,19 +221,12 @@ def createlog(ui, directory=None, root="", rlog=True, cache=None):
     cmd = ['cvs', '-q']
     if root:
         cmd.append('-d%s' % root)
-        p = util.normpath(getrepopath(root))
-        if not p.endswith('/'):
-            p += '/'
-        if prefix:
-            # looks like normpath replaces "" by "."
-            prefix = p + util.normpath(prefix)
-        else:
-            prefix = p
     cmd.append(['log', 'rlog'][rlog])
     if date:
         # no space between option and date string
         cmd.append('-d>%s' % date)
     cmd.append(directory)
+    prefix = build_prefix(root, directory)
 
     # state machine begins here
     tags = {}     # dictionary of revisions on current file with their tags
@@ -246,12 +260,7 @@ def createlog(ui, directory=None, root="", rlog=True, cache=None):
                     filename = util.normpath(rcs[:-2])
                     if filename.startswith(prefix):
                         filename = filename[len(prefix):]
-                    if filename.startswith('/'):
-                        filename = filename[1:]
-                    if filename.startswith('Attic/'):
-                        filename = filename[6:]
-                    else:
-                        filename = filename.replace('/Attic/', '/')
+                    filename = rcs_path(filename)
                     state = 2
                     continue
                 state = 1
@@ -449,7 +458,7 @@ def createlog(ui, directory=None, root="", rlog=True, cache=None):
 
             log.append(e)
 
-            rcsmap[e.rcs.replace('/Attic/', '/')] = e.rcs
+            rcsmap[e.file] = e.rcs
 
             if len(log) % 100 == 0:
                 ui.status(util.ellipsis('%d %s' % (len(log), e.file), 80)+'\n')
@@ -459,9 +468,8 @@ def createlog(ui, directory=None, root="", rlog=True, cache=None):
     # find parent revisions of individual files
     versions = {}
     for e in sorted(oldlog, key=lambda x: (x.rcs, x.revision)):
-        rcs = e.rcs.replace('/Attic/', '/')
-        if rcs in rcsmap:
-            e.rcs = rcsmap[rcs]
+        if e.file in rcsmap:
+            e.rcs = rcsmap[e.file]
         branch = e.revision[:-1]
         versions[(e.rcs, branch)] = e.revision
 
@@ -599,27 +607,8 @@ def createchangeset(ui, log, fuzz=60, mergefrom=None, mergeto=None):
         c.synthetic = len(c.entries) == 1 and c.entries[0].synthetic
 
     # Sort files in each changeset
-
-    def entitycompare(l, r):
-        'Mimic cvsps sorting order'
-        l = l.file.split('/')
-        r = r.file.split('/')
-        nl = len(l)
-        nr = len(r)
-        n = min(nl, nr)
-        for i in range(n):
-            if i + 1 == nl and nl < nr:
-                return -1
-            elif i + 1 == nr and nl > nr:
-                return +1
-            elif l[i] < r[i]:
-                return -1
-            elif l[i] > r[i]:
-                return +1
-        return 0
-
     for c in changesets:
-        c.entries.sort(entitycompare)
+        c.entries.sort(key=lambda x: tuple(enumerate(os.path.split(x.file))))
 
     # Sort changesets by date
 
